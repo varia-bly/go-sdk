@@ -1,182 +1,126 @@
 package variably
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"time"
 )
 
 // LogLevel represents the logging level
 type LogLevel int
 
 const (
-	DebugLevel LogLevel = iota
-	InfoLevel
-	WarnLevel
-	ErrorLevel
+	LogLevelDebug LogLevel = iota
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
 )
 
+// String returns the string representation of the log level
 func (l LogLevel) String() string {
 	switch l {
-	case DebugLevel:
+	case LogLevelDebug:
 		return "DEBUG"
-	case InfoLevel:
+	case LogLevelInfo:
 		return "INFO"
-	case WarnLevel:
+	case LogLevelWarn:
 		return "WARN"
-	case ErrorLevel:
+	case LogLevelError:
 		return "ERROR"
 	default:
 		return "UNKNOWN"
 	}
 }
 
-// DefaultLogger implements a basic logger with configurable output
+// Logger defines the logging interface used by the SDK
+type Logger interface {
+	Debug(message string, fields map[string]interface{})
+	Info(message string, fields map[string]interface{})
+	Warn(message string, fields map[string]interface{})
+	Error(message string, fields map[string]interface{})
+	SetLevel(level LogLevel)
+}
+
+// DefaultLogger is a simple logger implementation using Go's standard log package
 type DefaultLogger struct {
 	level  LogLevel
-	format string
 	logger *log.Logger
 }
 
 // NewDefaultLogger creates a new default logger
-func NewDefaultLogger(config LogConfig) *DefaultLogger {
-	level := parseLogLevel(config.Level)
-	format := config.Format
-	if format == "" {
-		format = "text"
-	}
-
-	var logger *log.Logger
-	switch config.Output {
-	case "stderr":
-		logger = log.New(os.Stderr, "", 0)
-	case "file":
-		// For simplicity, we'll use stdout if file is specified but no path given
-		logger = log.New(os.Stdout, "", 0)
-	default:
-		logger = log.New(os.Stdout, "", 0)
-	}
-
+func NewDefaultLogger(level LogLevel) *DefaultLogger {
 	return &DefaultLogger{
 		level:  level,
-		format: format,
-		logger: logger,
+		logger: log.New(os.Stdout, "[Variably SDK] ", log.LstdFlags),
 	}
 }
 
 // Debug logs a debug message
-func (l *DefaultLogger) Debug(msg string, fields ...interface{}) {
-	if l.level <= DebugLevel {
-		l.log(DebugLevel, msg, fields...)
+func (l *DefaultLogger) Debug(message string, fields map[string]interface{}) {
+	if l.level <= LogLevelDebug {
+		l.logWithFields(LogLevelDebug, message, fields)
 	}
 }
 
 // Info logs an info message
-func (l *DefaultLogger) Info(msg string, fields ...interface{}) {
-	if l.level <= InfoLevel {
-		l.log(InfoLevel, msg, fields...)
+func (l *DefaultLogger) Info(message string, fields map[string]interface{}) {
+	if l.level <= LogLevelInfo {
+		l.logWithFields(LogLevelInfo, message, fields)
 	}
 }
 
 // Warn logs a warning message
-func (l *DefaultLogger) Warn(msg string, fields ...interface{}) {
-	if l.level <= WarnLevel {
-		l.log(WarnLevel, msg, fields...)
+func (l *DefaultLogger) Warn(message string, fields map[string]interface{}) {
+	if l.level <= LogLevelWarn {
+		l.logWithFields(LogLevelWarn, message, fields)
 	}
 }
 
 // Error logs an error message
-func (l *DefaultLogger) Error(msg string, fields ...interface{}) {
-	if l.level <= ErrorLevel {
-		l.log(ErrorLevel, msg, fields...)
+func (l *DefaultLogger) Error(message string, fields map[string]interface{}) {
+	if l.level <= LogLevelError {
+		l.logWithFields(LogLevelError, message, fields)
 	}
 }
 
-// log performs the actual logging
-func (l *DefaultLogger) log(level LogLevel, msg string, fields ...interface{}) {
-	timestamp := time.Now().UTC()
-
-	if l.format == "json" {
-		l.logJSON(level, msg, timestamp, fields...)
-	} else {
-		l.logText(level, msg, timestamp, fields...)
-	}
+// SetLevel sets the logging level
+func (l *DefaultLogger) SetLevel(level LogLevel) {
+	l.level = level
 }
 
-// logJSON logs in JSON format
-func (l *DefaultLogger) logJSON(level LogLevel, msg string, timestamp time.Time, fields ...interface{}) {
-	logEntry := map[string]interface{}{
-		"timestamp": timestamp.Format(time.RFC3339),
-		"level":     level.String(),
-		"message":   msg,
-		"source":    "variably-sdk",
-	}
-
-	// Add fields as key-value pairs
-	for i := 0; i < len(fields); i += 2 {
-		if i+1 < len(fields) {
-			key := fmt.Sprintf("%v", fields[i])
-			value := fields[i+1]
-			logEntry[key] = value
+// logWithFields logs a message with structured fields
+func (l *DefaultLogger) logWithFields(level LogLevel, message string, fields map[string]interface{}) {
+	logMessage := fmt.Sprintf("[%s] %s", level.String(), message)
+	
+	if fields != nil && len(fields) > 0 {
+		logMessage += " "
+		for key, value := range fields {
+			logMessage += fmt.Sprintf("%s=%v ", key, value)
 		}
 	}
-
-	jsonData, err := json.Marshal(logEntry)
-	if err != nil {
-		// Fallback to simple text if JSON marshaling fails
-		l.logger.Printf("[%s] %s %s", level.String(), timestamp.Format(time.RFC3339), msg)
-		return
-	}
-
-	l.logger.Println(string(jsonData))
+	
+	l.logger.Println(logMessage)
 }
 
-// logText logs in text format
-func (l *DefaultLogger) logText(level LogLevel, msg string, timestamp time.Time, fields ...interface{}) {
-	// Build field string
-	fieldStr := ""
-	for i := 0; i < len(fields); i += 2 {
-		if i+1 < len(fields) {
-			key := fmt.Sprintf("%v", fields[i])
-			value := fmt.Sprintf("%v", fields[i+1])
-			fieldStr += fmt.Sprintf(" %s=%s", key, value)
-		}
-	}
-
-	l.logger.Printf("[%s] %s %s%s",
-		level.String(),
-		timestamp.Format("2006-01-02 15:04:05"),
-		msg,
-		fieldStr)
-}
-
-// parseLogLevel parses a string log level
-func parseLogLevel(level string) LogLevel {
-	switch level {
-	case "debug":
-		return DebugLevel
-	case "info":
-		return InfoLevel
-	case "warn":
-		return WarnLevel
-	case "error":
-		return ErrorLevel
-	default:
-		return InfoLevel
-	}
-}
-
-// NoOpLogger is a logger that does nothing (for testing or when logging is disabled)
+// NoOpLogger is a logger that doesn't log anything
 type NoOpLogger struct{}
-
-func (l *NoOpLogger) Debug(msg string, fields ...interface{}) {}
-func (l *NoOpLogger) Info(msg string, fields ...interface{})  {}
-func (l *NoOpLogger) Warn(msg string, fields ...interface{})  {}
-func (l *NoOpLogger) Error(msg string, fields ...interface{}) {}
 
 // NewNoOpLogger creates a new no-op logger
 func NewNoOpLogger() *NoOpLogger {
 	return &NoOpLogger{}
 }
+
+// Debug does nothing
+func (l *NoOpLogger) Debug(message string, fields map[string]interface{}) {}
+
+// Info does nothing
+func (l *NoOpLogger) Info(message string, fields map[string]interface{}) {}
+
+// Warn does nothing
+func (l *NoOpLogger) Warn(message string, fields map[string]interface{}) {}
+
+// Error does nothing
+func (l *NoOpLogger) Error(message string, fields map[string]interface{}) {}
+
+// SetLevel does nothing
+func (l *NoOpLogger) SetLevel(level LogLevel) {}

@@ -1,60 +1,23 @@
 # Variably Go SDK
 
-The official Go SDK for the Variably experimentation platform. This SDK provides a simple, type-safe, and performant way to integrate feature flags, A/B testing, and user targeting into your Go applications.
+The official Go SDK for [Variably](https://variably.com)'s dynamic configuration and feature flag platform. Get real-time configuration updates with intelligent fallback, comprehensive caching, and type-safe access methods.
 
 ## Features
 
-- ✅ **Type-Safe API**: Strongly typed with generic methods for different flag types
-- ✅ **High Performance**: Intelligent caching with configurable TTL and persistence
-- ✅ **Batch Operations**: Evaluate multiple flags in a single API call
-- ✅ **Real-time Updates**: WebSocket support for live flag updates
-- ✅ **Offline Support**: Cached fallbacks when API is unavailable
-- ✅ **Context Aware**: Full `context.Context` support for cancellation and timeouts
-- ✅ **Production Ready**: Circuit breakers, retries, and comprehensive error handling
-- ✅ **Observability**: Structured logging and built-in metrics
+- 🚀 **Real-time Updates**: WebSocket-based configuration updates with automatic fallback to polling
+- 🔒 **Type Safety**: Strongly typed configuration access methods
+- ⚡ **High Performance**: Multi-layer caching with intelligent invalidation
+- 🛡️ **Resilient**: Automatic reconnection and error handling
+- 📊 **Observable**: Comprehensive logging and metrics
+- 🔧 **Flexible**: Extensive configuration options
 
-## Quick Start
-
-### Installation
+## Installation
 
 ```bash
-go get github.com/varia-bly/go-sdk@latest
+go get github.com/varia-bly/go-sdk
 ```
 
-> **Note**: Always use the latest version tag for best compatibility. The current stable version is `v1.0.2`.
-
-### API Key Setup
-
-Before using the SDK, you need to generate an API key:
-
-1. **Register/Login** to get a JWT token:
-   ```bash
-   curl -X POST https://api.variably.com/api/v1/auth/register \
-     -H "Content-Type: application/json" \
-     -d '{
-       "email": "you@company.com",
-       "password": "secure_password",
-       "first_name": "Your",
-       "last_name": "Name",
-       "organization_name": "Your Company"
-     }'
-   ```
-
-2. **Create an API Key**:
-   ```bash
-   curl -X POST https://api.variably.com/api/v1/api-keys \
-     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-     -d '{
-       "name": "Production App Key",
-       "environment": "production",
-       "scopes": ["flags.read", "gates.read", "events.write"]
-     }'
-   ```
-
-3. **Save the key** - it's only shown once!
-   ```
-   vb_live_a1b2c3d4e5f6...your_key_here
-   ```
+## Quick Start
 
 ### Basic Usage
 
@@ -63,489 +26,440 @@ package main
 
 import (
     "context"
+    "fmt"
     "log"
     
     "github.com/varia-bly/go-sdk"
 )
 
 func main() {
-    // Initialize the client
-    client, err := variably.NewClient(&variably.Config{
-        APIKey:      "vb_live_your_api_key_here",
-        Environment: "production",
+    // Create client
+    client, err := variably.NewClient(variably.ClientConfig{
+        APIKey:    "your-api-key",
+        ProjectID: "your-project-id",
+        BaseURL:   "https://api.variably.com",
     })
     if err != nil {
-        log.Fatal("Failed to initialize Variably client:", err)
+        log.Fatal(err)
     }
     defer client.Close()
-    
+
     // Create user context
-    user := variably.UserContext{
-        UserID:  "user_123",
-        Email:   "user@example.com",
-        Country: "US",
+    userContext := variably.UserContext{
+        UserID: "user123",
+        Email:  "user@example.com",
         Attributes: map[string]interface{}{
-            "plan": "premium",
-            "signup_date": "2023-01-15",
+            "subscription_tier": "premium",
         },
     }
-    
-    // Evaluate a boolean feature flag
-    showNewFeature := client.EvaluateFlagBool(
-        context.Background(),
-        "new_dashboard_ui",
-        false, // default value
-        user,
-    )
-    
-    if showNewFeature {
-        // Show new UI
-        log.Println("Showing new dashboard UI")
-    } else {
-        // Show old UI
-        log.Println("Showing legacy dashboard UI")
-    }
-    
-    // Evaluate a feature gate
-    canAccessPremium := client.EvaluateGate(
-        context.Background(),
-        "premium_features",
-        user,
-    )
-    
-    if canAccessPremium {
-        // Enable premium features
-        log.Println("User has premium access")
-    }
-    
-    // Track user interaction
-    client.Track(context.Background(), variably.Event{
-        Name:   "dashboard_viewed",
-        UserID: user.UserID,
-        Properties: map[string]interface{}{
-            "ui_version": map[bool]string{true: "new", false: "legacy"}[showNewFeature],
-            "has_premium": canAccessPremium,
-        },
-    })
+
+    ctx := context.Background()
+
+    // Get configurations
+    featureEnabled, _ := client.GetConfigBool(ctx, "new_feature", false, userContext)
+    maxRetries, _ := client.GetConfigNumber(ctx, "max_retries", 3, userContext)
+    theme, _ := client.GetConfigString(ctx, "theme", "light", userContext)
+
+    fmt.Printf("Feature: %v, Retries: %.0f, Theme: %s\n", 
+        featureEnabled, maxRetries, theme)
 }
-```
-
-## API Key Management
-
-### Key Format
-
-API keys follow this format: `{environment_prefix}_{secret}`
-
-- **Production**: `vb_live_` + 64-character secret
-- **Staging**: `vb_test_` + 64-character secret  
-- **Development**: `vb_dev_` + 64-character secret
-
-### Key Scopes
-
-When creating API keys, specify the required scopes:
-
-| Scope | Description | SDK Methods Enabled |
-|-------|-------------|-------------------|
-| `flags.read` | Read feature flags | `EvaluateFlag*` methods |
-| `gates.read` | Read feature gates | `EvaluateGate*` methods |
-| `experiments.read` | Read experiments | Experiment assignment |
-| `events.write` | Send analytics events | `Track*` methods |
-
-### Environment Variables
-
-Store your API key securely using environment variables:
-
-```bash
-export VARIABLY_API_KEY="vb_live_your_key_here"
-export VARIABLY_ENVIRONMENT="production"
-```
-
-```go
-// Load configuration from environment
-client, err := variably.NewClientFromEnv()
-```
-
-### Configuration Files
-
-Create a `variably.yaml` file:
-
-```yaml
-api_key: "vb_live_your_key_here"
-environment: "production"
-timeout: "5s"
-enable_analytics: true
-
-cache_config:
-  ttl: "5m"
-  max_size: 1000
-  enable_persistence: true
-
-log_config:
-  level: "info"
-  format: "json"
-```
-
-```go
-client, err := variably.NewClientFromFile("variably.yaml")
-```
-
-## Advanced Usage
-
-### Type-Safe Flag Evaluation
-
-The SDK provides type-safe methods for different flag types:
-
-```go
-// Boolean flags
-enabled := client.EvaluateFlagBool(ctx, "feature_enabled", false, user)
-
-// String flags  
-theme := client.EvaluateFlagString(ctx, "ui_theme", "light", user)
-
-// Integer flags
-maxItems := client.EvaluateFlagInt(ctx, "max_items_per_page", 10, user)
-
-// Float flags
-conversionRate := client.EvaluateFlagFloat(ctx, "conversion_rate", 0.05, user)
-
-// JSON flags (complex objects)
-config := client.EvaluateFlagJSON(ctx, "advanced_config", map[string]interface{}{
-    "timeout": 30,
-    "retries": 3,
-}, user)
-```
-
-### Batch Operations
-
-For high-performance scenarios, use batch operations:
-
-```go
-// Evaluate multiple flags in one API call
-flagKeys := []string{"feature_a", "feature_b", "feature_c"}
-results := client.EvaluateFlags(context.Background(), flagKeys, user)
-
-for flagKey, result := range results {
-    if result.Error != nil {
-        log.Printf("Error evaluating %s: %v", flagKey, result.Error)
-        continue
-    }
-    log.Printf("Flag %s = %v (reason: %s)", flagKey, result.Value, result.Reason)
-}
-
-// Evaluate multiple gates
-gateKeys := []string{"premium_features", "beta_access", "admin_panel"}
-gateResults := client.EvaluateGates(context.Background(), gateKeys, user)
-```
-
-### Error Handling
-
-The SDK provides comprehensive error handling:
-
-```go
-result := client.EvaluateFlag(ctx, "my_flag", "default", user)
-if result.Error != nil {
-    switch err := result.Error.(type) {
-    case *variably.NetworkError:
-        log.Printf("Network error: %v", err)
-        // Handle network issues
-    case *variably.AuthenticationError:
-        log.Printf("Authentication error: %v", err)
-        // Handle invalid API key
-    case *variably.RateLimitError:
-        log.Printf("Rate limit exceeded: %v", err)
-        // Handle rate limiting
-    default:
-        log.Printf("Unknown error: %v", err)
-    }
-}
-```
-
-### Custom Configuration
-
-```go
-client, err := variably.NewClient(&variably.Config{
-    APIKey:      "vb_live_your_key_here",
-    Environment: "production",
-    BaseURL:     "https://api.yourcompany.com", // Custom endpoint
-    
-    // Performance tuning
-    Timeout:       10 * time.Second,
-    RetryAttempts: 5,
-    MaxCacheSize:  2000,
-    
-    // Caching configuration
-    CacheConfig: variably.CacheConfig{
-        TTL:               10 * time.Minute,
-        MaxSize:           2000,
-        EnablePersistence: true,
-        PersistencePath:   "/var/cache/variably",
-        EvictionPolicy:    "LRU",
-    },
-    
-    // Real-time updates
-    PollingConfig: variably.PollingConfig{
-        Enabled:  true,
-        Interval: 30 * time.Second,
-        Jitter:   5 * time.Second,
-    },
-    
-    // Features
-    EnableAnalytics:    true,
-    EnableOfflineMode:  true,
-    EnableRealTimeSync: true,
-    
-    // Custom logging
-    LogConfig: variably.LogConfig{
-        Level:  "debug",
-        Format: "json",
-        Output: "stdout",
-    },
-})
 ```
 
 ### Real-time Updates
 
-Subscribe to real-time flag updates:
-
 ```go
-// Subscribe to flag changes
-flagKeys := []string{"feature_enabled", "ui_theme"}
-err := client.Subscribe(context.Background(), flagKeys, func(flagKey string, newResult variably.FlagResult) {
-    log.Printf("Flag %s updated: %v", flagKey, newResult.Value)
+// Enable real-time updates
+client, err := variably.NewClient(variably.ClientConfig{
+    APIKey:         "your-api-key",
+    JWTToken:       "your-jwt-token", // Required for WebSocket auth
+    ProjectID:      "your-project-id",
+    EnableRealtime: true,
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+// Subscribe to specific config changes
+unsubscribe := client.OnConfigChange("feature_flag", func(result *variably.DynamicConfigResult) {
+    fmt.Printf("Config updated: %s = %v\n", result.Key, result.Value)
     
-    // Update your application state
-    switch flagKey {
-    case "feature_enabled":
-        updateFeatureState(newResult.Value.(bool))
-    case "ui_theme":
-        updateUITheme(newResult.Value.(string))
+    if result.RealTimeUpdate {
+        fmt.Println("✅ Received via WebSocket")
+    } else {
+        fmt.Println("📊 Received via polling")
     }
 })
+defer unsubscribe()
 
-// Later, unsubscribe when no longer needed
-client.Unsubscribe(flagKeys)
-```
-
-### Analytics and Event Tracking
-
-Track user interactions and custom events:
-
-```go
-// Track single event
-client.Track(context.Background(), variably.Event{
-    Name:   "button_clicked",
-    UserID: user.UserID,
-    Properties: map[string]interface{}{
-        "button_id": "signup_cta",
-        "page":      "landing",
-        "variant":   "blue_button",
-    },
+// Subscribe to all config changes
+unsubscribeAll := client.OnAnyConfigChange(func(result *variably.DynamicConfigResult) {
+    fmt.Printf("Any config changed: %s\n", result.Key)
 })
+defer unsubscribeAll()
+```
 
-// Track multiple events efficiently
-events := []variably.Event{
-    {
-        Name:   "page_viewed",
-        UserID: user.UserID,
-        Properties: map[string]interface{}{
-            "page": "dashboard",
-            "load_time": 1.23,
-        },
+## Configuration
+
+### Client Configuration
+
+```go
+config := variably.ClientConfig{
+    // Required
+    APIKey:    "your-api-key",
+    ProjectID: "your-project-id",
+    
+    // Optional
+    JWTToken:       "jwt-token",              // For WebSocket authentication
+    BaseURL:        "https://api.variably.com", // API base URL
+    EnableRealtime: true,                     // Enable real-time updates
+    PollingInterval: 30 * time.Second,       // Fallback polling interval
+    Debug:          false,                    // Enable debug logging
+    
+    // Cache configuration
+    Cache: variably.CacheConfig{
+        TTL:     5 * time.Minute, // Cache time-to-live
+        MaxSize: 1000,            // Maximum cached entries
+        Enabled: true,            // Enable caching
     },
-    {
-        Name:   "feature_used",
-        UserID: user.UserID,
-        Properties: map[string]interface{}{
-            "feature": "export_data",
-            "format":  "csv",
-        },
+    
+    // WebSocket configuration
+    WebSocket: variably.WSConfig{
+        ReconnectInterval:    5 * time.Second, // Time between reconnect attempts
+        MaxReconnectAttempts: 10,              // Maximum reconnection attempts
+        ConnectionTimeout:    10 * time.Second,// WebSocket connection timeout
+        AutoReconnect:        true,            // Enable automatic reconnection
     },
 }
 
-client.TrackBatch(context.Background(), events)
+client, err := variably.NewClient(config)
 ```
 
-### Performance Monitoring
-
-Monitor SDK performance and usage:
+### Default Configuration
 
 ```go
-metrics := client.GetMetrics()
+// Use default configuration with minimal setup
+config := variably.DefaultClientConfig()
+config.APIKey = "your-api-key"
+config.ProjectID = "your-project-id"
 
-log.Printf("API Calls: %d", metrics.APICalls)
-log.Printf("Cache Hit Rate: %.2f%%", metrics.CacheHitRate)
-log.Printf("Error Rate: %.2f%%", metrics.ErrorRate)
-log.Printf("Average Latency: %v", metrics.AverageLatency)
-log.Printf("Flags Evaluated: %d", metrics.FlagsEvaluated)
-log.Printf("Events Tracked: %d", metrics.EventsTracked)
+client, err := variably.NewClient(config)
 ```
 
-## Testing
+## API Reference
 
-### Unit Testing with Mock Client
+### Configuration Access Methods
 
-The SDK provides a mock client for unit testing:
+#### GetConfig
+```go
+value, err := client.GetConfig(ctx, "config_key", defaultValue, userContext)
+```
+
+#### GetConfigBool
+```go
+enabled, err := client.GetConfigBool(ctx, "feature_enabled", false, userContext)
+```
+
+#### GetConfigString
+```go
+message, err := client.GetConfigString(ctx, "welcome_message", "Hello", userContext)
+```
+
+#### GetConfigNumber
+```go
+limit, err := client.GetConfigNumber(ctx, "rate_limit", 100.0, userContext)
+```
+
+#### GetConfigJSON
+```go
+config, err := client.GetConfigJSON(ctx, "ui_config", defaultConfig, userContext)
+```
+
+#### EvaluateConfig
+```go
+result, err := client.EvaluateConfig(ctx, "config_key", defaultValue, userContext)
+// Result contains detailed information:
+// - Key, Value, Reason
+// - RuleID, ETag, Version
+// - CacheHit, RealTimeUpdate
+// - RetrievedAt, UpdatedAt
+```
+
+### Subscription Methods
+
+#### OnConfigChange
+```go
+unsubscribe := client.OnConfigChange("config_key", func(result *variably.DynamicConfigResult) {
+    // Handle configuration change
+})
+defer unsubscribe()
+```
+
+#### OnAnyConfigChange
+```go
+unsubscribe := client.OnAnyConfigChange(func(result *variably.DynamicConfigResult) {
+    // Handle any configuration change in the project
+})
+defer unsubscribe()
+```
+
+### Utility Methods
+
+#### RefreshConfigs
+```go
+err := client.RefreshConfigs(ctx, userContext)
+```
+
+#### GetConnectionStatus
+```go
+status := client.GetConnectionStatus()
+fmt.Printf("Mode: %s, Connected: %v\n", status.Mode, status.Connected)
+```
+
+#### Close
+```go
+client.Close() // Clean shutdown
+```
+
+## User Context
+
+The user context provides information for configuration evaluation:
 
 ```go
-func TestMyFeature(t *testing.T) {
-    // Create mock client
-    mockClient := variably.NewMockClient()
-    
-    // Set up mock responses
-    mockClient.SetFlagValue("feature_enabled", true)
-    mockClient.SetFlagValue("ui_theme", "dark")
-    mockClient.SetGateValue("premium_features", false)
-    
-    // Use in your service
-    service := NewMyService(mockClient)
-    
-    // Test your logic
-    result := service.ProcessUser(user)
-    
-    // Verify behavior
-    assert.True(t, result.FeatureEnabled)
-    assert.Equal(t, "dark", result.Theme)
-    
-    // Verify tracked events
-    events := mockClient.GetTrackedEvents()
-    assert.Len(t, events, 1)
-    assert.Equal(t, "feature_used", events[0].Name)
+userContext := variably.UserContext{
+    UserID:     "user123",           // Required
+    Email:      "user@example.com",  // Optional
+    Country:    "US",                // Optional
+    Language:   "en",                // Optional
+    Platform:   "web",               // Optional
+    Version:    "1.2.3",             // Optional
+    IPAddress:  "192.168.1.1",       // Optional
+    UserAgent:  "Mozilla/5.0...",    // Optional
+    SessionID:  "session123",        // Optional
+    Attributes: map[string]interface{}{ // Optional custom attributes
+        "subscription_tier": "premium",
+        "signup_date":      "2023-01-15",
+        "experiments":      []string{"exp1", "exp2"},
+    },
 }
 ```
 
-### Integration Testing
+## Connection Modes
 
-Test against a real Variably instance:
+The SDK operates in three modes:
+
+1. **Real-time Mode**: WebSocket connection for instant updates
+2. **Polling Mode**: HTTP polling fallback when WebSocket unavailable
+3. **Offline Mode**: Uses cached values only
+
+The SDK automatically handles fallback between modes based on connectivity.
+
+## Caching
+
+The SDK implements intelligent caching:
+
+- **L1 Cache**: In-memory cache with TTL
+- **Context-aware**: Separate cache entries per user context
+- **Smart Invalidation**: Real-time cache invalidation on updates
+- **Pattern Matching**: Bulk cache clearing by pattern
+
+## Error Handling
+
+The SDK provides specific error types:
 
 ```go
-func TestIntegration(t *testing.T) {
-    if testing.Short() {
-        t.Skip("Skipping integration test")
+import "errors"
+
+if err != nil {
+    var netErr *variably.NetworkError
+    var authErr *variably.AuthenticationError
+    var configErr *variably.ConfigurationError
+    
+    switch {
+    case errors.As(err, &netErr):
+        if netErr.IsRetryable() {
+            // Retry the operation
+        }
+    case errors.As(err, &authErr):
+        // Handle authentication error
+    case errors.As(err, &configErr):
+        // Handle configuration error
     }
-    
-    client, err := variably.NewClient(&variably.Config{
-        APIKey:      os.Getenv("VARIABLY_TEST_API_KEY"),
-        Environment: "test",
-        BaseURL:     "http://localhost:8080",
-    })
-    require.NoError(t, err)
-    defer client.Close()
-    
-    // Test flag evaluation
-    result := client.EvaluateFlagBool(
-        context.Background(),
-        "test_flag",
-        false,
-        variably.UserContext{UserID: "test_user"},
-    )
-    
-    // Verify result
-    assert.NotNil(t, result)
 }
 ```
 
-## Performance Tips
+## Logging
 
-1. **Use Batch Operations**: Evaluate multiple flags in a single call
-2. **Enable Caching**: Configure appropriate TTL for your use case
-3. **Use Persistence**: Enable disk cache for faster startup
-4. **Optimize User Context**: Only include necessary attributes
-5. **Monitor Metrics**: Use built-in metrics to optimize performance
-
-## Migration Guide
-
-### From LaunchDarkly
+### Default Logger
 
 ```go
-// LaunchDarkly
-variation := ldClient.BoolVariation("feature-key", user, false)
-
-// Variably
-enabled := client.EvaluateFlagBool(ctx, "feature-key", false, userContext)
+// Debug logging
+client, err := variably.NewClient(variably.ClientConfig{
+    Debug: true, // Enables debug logging
+    // ... other config
+})
 ```
 
-### From Split
+### Custom Logger
 
 ```go
-// Split
-treatment := splitClient.GetTreatment("user-key", "feature-name")
+// Implement the Logger interface
+type CustomLogger struct{}
 
-// Variably  
-value := client.EvaluateFlagString(ctx, "feature-name", "control", userContext)
+func (l *CustomLogger) Debug(message string, fields map[string]interface{}) {
+    // Your debug logging implementation
+}
+
+func (l *CustomLogger) Info(message string, fields map[string]interface{}) {
+    // Your info logging implementation
+}
+
+func (l *CustomLogger) Warn(message string, fields map[string]interface{}) {
+    // Your warning logging implementation
+}
+
+func (l *CustomLogger) Error(message string, fields map[string]interface{}) {
+    // Your error logging implementation
+}
+
+func (l *CustomLogger) SetLevel(level variably.LogLevel) {
+    // Set logging level
+}
+
+// Use custom logger
+logger := &CustomLogger{}
+client, err := variably.NewClientWithLogger(config, logger)
 ```
 
-### From Optimizely
+### No-op Logger
 
 ```go
-// Optimizely
-enabled := optimizelyClient.IsFeatureEnabled("feature-key", "user-id", userAttributes)
+// Disable all logging
+logger := variably.NewNoOpLogger()
+client, err := variably.NewClientWithLogger(config, logger)
+```
 
-// Variably
-enabled := client.EvaluateFlagBool(ctx, "feature-key", false, userContext)
+## Best Practices
+
+### 1. Resource Management
+Always close the client when done:
+```go
+defer client.Close()
+```
+
+### 2. Context Usage
+Use appropriate contexts for cancellation:
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+value, err := client.GetConfig(ctx, "key", default, userContext)
+```
+
+### 3. Error Handling
+Handle errors appropriately:
+```go
+value, err := client.GetConfigBool(ctx, "feature", false, userContext)
+if err != nil {
+    log.Printf("Failed to get config: %v", err)
+    // Use default value or handle error
+}
+```
+
+### 4. Subscription Management
+Always unsubscribe to prevent memory leaks:
+```go
+unsubscribe := client.OnConfigChange("key", callback)
+defer unsubscribe()
+```
+
+### 5. User Context Reuse
+Reuse user context objects when possible:
+```go
+userContext := variably.UserContext{UserID: "user123"}
+
+// Reuse for multiple calls
+value1, _ := client.GetConfig(ctx, "key1", default1, userContext)
+value2, _ := client.GetConfig(ctx, "key2", default2, userContext)
 ```
 
 ## Examples
 
-See the [`examples/`](./examples/) directory for complete examples:
+See the [example_test.go](example_test.go) file for comprehensive usage examples.
 
-- [Basic Usage](./examples/basic_usage.go) - Simple flag evaluation
-- [Web Application](./examples/web_server.go) - HTTP server integration
-- [Background Worker](./examples/worker.go) - Long-running service
-- [Testing](./examples/testing_example_test.go) - Unit and integration tests
+## Performance Considerations
 
-## API Reference
+- **Caching**: Enable caching (default) for better performance
+- **Connection Pooling**: The SDK reuses HTTP connections
+- **Batching**: Group multiple config requests when possible
+- **Context Reuse**: Reuse user context objects to improve cache hit rates
 
-### Client Interface
+## Troubleshooting
 
-```go
-type Client interface {
-    // Feature Flag Operations
-    EvaluateFlag(ctx context.Context, flagKey string, defaultValue interface{}, userContext UserContext) FlagResult
-    EvaluateFlagBool(ctx context.Context, flagKey string, defaultValue bool, userContext UserContext) bool
-    EvaluateFlagString(ctx context.Context, flagKey string, defaultValue string, userContext UserContext) string
-    EvaluateFlagInt(ctx context.Context, flagKey string, defaultValue int, userContext UserContext) int
-    EvaluateFlagFloat(ctx context.Context, flagKey string, defaultValue float64, userContext UserContext) float64
-    EvaluateFlagJSON(ctx context.Context, flagKey string, defaultValue interface{}, userContext UserContext) interface{}
-    
-    // Feature Gate Operations
-    EvaluateGate(ctx context.Context, gateKey string, userContext UserContext) bool
-    
-    // Batch Operations
-    EvaluateFlags(ctx context.Context, flagKeys []string, userContext UserContext) map[string]FlagResult
-    EvaluateGates(ctx context.Context, gateKeys []string, userContext UserContext) map[string]bool
-    
-    // Event Tracking
-    Track(ctx context.Context, event Event) error
-    TrackBatch(ctx context.Context, events []Event) error
-    
-    // Real-time Updates
-    Subscribe(ctx context.Context, flagKeys []string, callback UpdateCallback) error
-    Unsubscribe(flagKeys []string) error
-    
-    // Cache Management
-    RefreshCache(ctx context.Context) error
-    ClearCache() error
-    
-    // Metrics
-    GetMetrics() Metrics
-    
-    // Lifecycle
-    Close() error
-}
-```
+### WebSocket Connection Issues
+- Ensure JWT token is provided and valid
+- Check firewall settings for WebSocket connections
+- Verify base URL uses correct protocol (https for wss)
 
-## Requirements
+### Cache Issues
+- Monitor cache hit rates via logging
+- Adjust TTL based on your use case
+- Clear cache manually if needed: `client.RefreshConfigs()`
 
-- Go 1.19 or later
-- Network access to Variably API (or cached flags for offline mode)
-
-## Support
-
-- 📧 Email: support@variably.com
-- 💬 Discord: [Variably Community](https://discord.gg/variably)
-- 🐛 Issues: [GitHub Issues](https://github.com/varia-bly/go-sdk/issues)
-- 📚 Docs: [Documentation Site](https://docs.variably.com)
+### Performance Issues  
+- Enable debug logging to identify bottlenecks
+- Monitor connection status: `client.GetConnectionStatus()`
+- Consider increasing cache size for high-traffic applications
 
 ## License
 
-MIT License. See [LICENSE](../../LICENSE) for details.
+This SDK is licensed under the MIT License. See LICENSE file for details.
+
+## Support
+
+For support and questions:
+- 📧 Email: support@variably.com
+- 📖 Documentation: https://docs.variably.com
+- 🐛 Issues: https://github.com/varia-bly/go-sdk/issues
+## Prompt config store (local assignment)
+
+Assigning a prompt variant used to mean a backend call per event. `PromptConfigStore`
+bootstraps the project's prompt-experiment config once, refreshes it in the background
+with `ETag`/`If-None-Match` (a 304 is a no-op), and assigns variants **in-process**, so a
+per-event assignment costs no network call.
+
+```go
+store := variably.NewPromptConfigStore(
+    variably.HTTPPromptConfigFetcher(baseURL, apiKey, nil),
+)
+if err := store.Refresh(ctx); err != nil {
+    // a failed bootstrap leaves the store empty; Assign returns nil and the
+    // caller should fall back to the server
+}
+store.StartPolling(variably.DefaultPromptPollInterval) // 45s, matching the Python SDK
+defer store.Close()
+
+variant := store.Assign("greeting-experiment", userID, sessionID)
+if variant == nil {
+    // Not in the snapshot — the experiment may have been created between polls.
+    // Fall back to the server rather than treating it as absent.
+}
+```
+
+Assignment is deterministic and sticky: the same `(experiment, user)` always maps to the
+same variant, using the exact bucketing the server uses.
+
+**`assignment.go` is a port of the server's `internal/assignment` and must stay
+byte-for-byte equivalent to it.** Both sides compute assignments, so any divergence would
+flip a user between variants depending on which side answered — corrupting an experiment
+rather than merely disagreeing. `assignment_test.go` pins the shared golden vectors;
+a failure there means drift, and the drift is what needs fixing.
+
+Verified identical across the server, this SDK, and the Python SDK:
+
+| salt \| key | bucket |
+| --- | --- |
+| `exp-1` \| `user-1` | 60.33 |
+| `exp-1` \| `user-2` | 31.76 |
+| `exp-2` \| `user-1` | 9.74 |
+| `greeting` \| `abc123` | 94.44 |

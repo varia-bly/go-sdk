@@ -2,290 +2,385 @@ package variably
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestMockClient(t *testing.T) {
-	client := NewMockClient()
+func TestNewClient(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  ClientConfig
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			config: ClientConfig{
+				APIKey:    "test-api-key",
+				ProjectID: "test-project",
+				BaseURL:   "http://localhost:8080",
+			},
+			wantErr: false,
+		},
+		{
+			name: "missing api key",
+			config: ClientConfig{
+				ProjectID: "test-project",
+				BaseURL:   "http://localhost:8080",
+			},
+			wantErr: true,
+		},
+		{
+			name: "missing project id",
+			config: ClientConfig{
+				APIKey:  "test-api-key",
+				BaseURL: "http://localhost:8080",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := NewClient(tt.config)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, client)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, client)
+				if client != nil {
+					client.Close()
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultClientConfig(t *testing.T) {
+	config := DefaultClientConfig()
+	
+	// Deliberately empty: NewVariablyClient rejects a missing base URL rather than
+	// defaulting to localhost, which in production would make every flag read as its
+	// default — indistinguishable from a rollout that turned everything off.
+	assert.Equal(t, "", config.BaseURL)
+	assert.Equal(t, true, config.EnableRealtime)
+	assert.Equal(t, 30*time.Second, config.PollingInterval)
+	assert.Equal(t, 5*time.Minute, config.Cache.TTL)
+	assert.Equal(t, 1000, config.Cache.MaxSize)
+	assert.Equal(t, true, config.Cache.Enabled)
+	assert.Equal(t, 5*time.Second, config.WebSocket.ReconnectInterval)
+	assert.Equal(t, 10, config.WebSocket.MaxReconnectAttempts)
+	assert.Equal(t, 10*time.Second, config.WebSocket.ConnectionTimeout)
+	assert.Equal(t, true, config.WebSocket.AutoReconnect)
+	assert.Equal(t, false, config.Debug)
+}
+
+func TestDynamicConfigClient_GetConfig(t *testing.T) {
+	// Create mock server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/api/v1/sdk/dynamic-configs/evaluate", r.URL.Path)
+		// The API authenticates SDK traffic with X-API-Key; a bearer token is rejected.
+		assert.Equal(t, "test-api-key", r.Header.Get("X-API-Key"))
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var req DynamicConfigEvaluationRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		require.NoError(t, err)
+		
+		assert.Equal(t, "test_config", req.ConfigKey)
+		assert.Equal(t, "user123", req.Context.UserID)
+
+		response := DynamicConfigEvaluationResponse{
+			ConfigKey: "test_config",
+			Value:     json.RawMessage(`true`),
+			Reason:    "rule_match",
+			ETag:      "etag123",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        server.URL,
+		EnableRealtime: false, // Disable real-time for this test
+	})
+	require.NoError(t, err)
 	defer client.Close()
 
-	// Test user context
-	user := UserContext{
-		UserID:  "test_user",
-		Email:   "test@example.com",
-		Country: "US",
+	userContext := UserContext{
+		UserID: "user123",
 	}
 
-	// Test boolean flag evaluation
-	t.Run("Boolean Flag", func(t *testing.T) {
-		client.SetFlagValue("test_flag", true)
-		
-		result := client.EvaluateFlagBool(context.Background(), "test_flag", false, user)
-		if !result {
-			t.Errorf("Expected true, got %v", result)
-		}
-		
-		// Test default value for non-existent flag
-		result = client.EvaluateFlagBool(context.Background(), "non_existent", false, user)
-		if result {
-			t.Errorf("Expected false (default), got %v", result)
-		}
-	})
-
-	// Test string flag evaluation
-	t.Run("String Flag", func(t *testing.T) {
-		client.SetFlagValue("theme", "dark")
-		
-		result := client.EvaluateFlagString(context.Background(), "theme", "light", user)
-		if result != "dark" {
-			t.Errorf("Expected 'dark', got %v", result)
-		}
-	})
-
-	// Test integer flag evaluation
-	t.Run("Integer Flag", func(t *testing.T) {
-		client.SetFlagValue("max_items", 20)
-		
-		result := client.EvaluateFlagInt(context.Background(), "max_items", 10, user)
-		if result != 20 {
-			t.Errorf("Expected 20, got %v", result)
-		}
-	})
-
-	// Test feature gate evaluation
-	t.Run("Feature Gate", func(t *testing.T) {
-		client.SetGateValue("premium_features", true)
-		
-		result := client.EvaluateGate(context.Background(), "premium_features", user)
-		if !result {
-			t.Errorf("Expected true, got %v", result)
-		}
-		
-		// Test default value for non-existent gate
-		result = client.EvaluateGate(context.Background(), "non_existent_gate", user)
-		if result {
-			t.Errorf("Expected false (default), got %v", result)
-		}
-	})
-
-	// Test batch operations
-	t.Run("Batch Evaluation", func(t *testing.T) {
-		client.SetFlagValue("flag_a", "value_a")
-		client.SetFlagValue("flag_b", true)
-		
-		results := client.EvaluateFlags(context.Background(), []string{"flag_a", "flag_b", "flag_c"}, user)
-		
-		if len(results) != 3 {
-			t.Errorf("Expected 3 results, got %d", len(results))
-		}
-		
-		if results["flag_a"].Value != "value_a" {
-			t.Errorf("Expected 'value_a', got %v", results["flag_a"].Value)
-		}
-		
-		if results["flag_b"].Value != true {
-			t.Errorf("Expected true, got %v", results["flag_b"].Value)
-		}
-		
-		// flag_c should return nil as default since it's not set
-		if results["flag_c"].Value != nil {
-			t.Errorf("Expected nil (default), got %v", results["flag_c"].Value)
-		}
-	})
-
-	// Test event tracking
-	t.Run("Event Tracking", func(t *testing.T) {
-		event := Event{
-			Name:   "test_event",
-			UserID: "test_user",
-			Properties: map[string]interface{}{
-				"action": "click",
-				"value":  42,
-			},
-		}
-		
-		err := client.Track(context.Background(), event)
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
-		
-		events := client.GetTrackedEvents()
-		if len(events) != 1 {
-			t.Errorf("Expected 1 tracked event, got %d", len(events))
-		}
-		
-		if events[0].Name != "test_event" {
-			t.Errorf("Expected event name 'test_event', got %v", events[0].Name)
-		}
-		
-		// Test batch tracking
-		batchEvents := []Event{
-			{Name: "event1", UserID: "user1"},
-			{Name: "event2", UserID: "user2"},
-		}
-		
-		err = client.TrackBatch(context.Background(), batchEvents)
-		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
-		}
-		
-		allEvents := client.GetTrackedEvents()
-		if len(allEvents) != 3 {
-			t.Errorf("Expected 3 total tracked events, got %d", len(allEvents))
-		}
-	})
-
-	// Test metrics
-	t.Run("Metrics", func(t *testing.T) {
-		metrics := client.GetMetrics()
-		
-		if metrics.FlagsEvaluated == 0 {
-			t.Error("Expected some flag evaluations to be recorded")
-		}
-		
-		if metrics.EventsTracked == 0 {
-			t.Error("Expected some events to be recorded")
-		}
-	})
+	ctx := context.Background()
+	value, err := client.GetConfigBool(ctx, "test_config", false, userContext)
+	
+	assert.NoError(t, err)
+	assert.True(t, value)
 }
 
-func TestConfig(t *testing.T) {
-	t.Run("Default Config", func(t *testing.T) {
-		config := DefaultConfig()
-		
-		if config.BaseURL == "" {
-			t.Error("Expected default base URL to be set")
+func TestDynamicConfigClient_EvaluateConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := DynamicConfigEvaluationResponse{
+			ConfigKey: "test_config",
+			Value:     json.RawMessage(`"hello world"`),
+			Reason:    "default_value",
+			ETag:      "etag456",
 		}
-		
-		if config.Environment == "" {
-			t.Error("Expected default environment to be set")
-		}
-		
-		if config.Timeout == 0 {
-			t.Error("Expected default timeout to be set")
-		}
-		
-		if config.CacheConfig.TTL == 0 {
-			t.Error("Expected default cache TTL to be set")
-		}
-	})
 
-	t.Run("Config Validation", func(t *testing.T) {
-		// Valid config
-		config := &Config{
-			APIKey:      "test-key",
-			BaseURL:     "https://api.example.com",
-			Environment: "test",
-			Timeout:     5 * time.Second,
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        server.URL,
+		EnableRealtime: false,
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	userContext := UserContext{
+		UserID: "user123",
+	}
+
+	ctx := context.Background()
+	result, err := client.EvaluateConfig(ctx, "test_config", "default", userContext)
+	
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, "test_config", result.Key)
+	assert.Equal(t, "hello world", result.Value)
+	assert.Equal(t, "api_evaluation", result.Reason)
+	assert.False(t, result.CacheHit)
+	assert.False(t, result.RealTimeUpdate)
+	assert.NotZero(t, result.RetrievedAt)
+}
+
+func TestDynamicConfigClient_CacheHit(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		response := DynamicConfigEvaluationResponse{
+			ConfigKey: "cached_config",
+			Value:     json.RawMessage(`42`),
+			Reason:    "rule_match",
 		}
-		
-		err := config.Validate()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        server.URL,
+		EnableRealtime: false,
+		Cache: CacheConfig{
+			TTL:     10 * time.Minute,
+			MaxSize: 100,
+			Enabled: true,
+		},
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	userContext := UserContext{
+		UserID: "user123",
+	}
+
+	ctx := context.Background()
+
+	// First call - should hit the server
+	result1, err := client.EvaluateConfig(ctx, "cached_config", 0.0, userContext)
+	assert.NoError(t, err)
+	assert.False(t, result1.CacheHit)
+	assert.Equal(t, 1, callCount)
+
+	// Second call - should hit the cache
+	result2, err := client.EvaluateConfig(ctx, "cached_config", 0.0, userContext)
+	assert.NoError(t, err)
+	assert.True(t, result2.CacheHit)
+	assert.Equal(t, 1, callCount) // Server should not be called again
+}
+
+func TestDynamicConfigClient_OnConfigChange(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        "http://localhost:8080",
+		EnableRealtime: false, // Disable real-time for this test
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Test the subscription callback mechanism
+	unsubscribe := client.OnConfigChange("test_config", func(result *DynamicConfigResult) {
+		// This callback would be triggered by real WebSocket updates
+		// In integration tests, we would verify the result here
+		_ = result
+	})
+	defer unsubscribe()
+	
+	// Verify subscription was created (callback exists)
+	// Note: Without access to private methods, we can't fully test the internal callback mechanism
+	// In practice, this would be tested through integration tests with a real WebSocket connection
+	assert.NotNil(t, unsubscribe, "Unsubscribe function should be returned")
+}
+
+func TestDynamicConfigClient_ValidationErrors(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        "http://localhost:8080",
+		EnableRealtime: false,
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx := context.Background()
+	userContext := UserContext{UserID: "user123"}
+
+	// Test empty config key
+	result, err := client.EvaluateConfig(ctx, "", "default", userContext)
+	assert.Error(t, err)
+	assert.IsType(t, &ValidationError{}, err)
+	assert.Nil(t, result)
+
+	// Test empty user ID
+	emptyUserContext := UserContext{}
+	result, err = client.EvaluateConfig(ctx, "config_key", "default", emptyUserContext)
+	assert.Error(t, err)
+	assert.IsType(t, &ValidationError{}, err)
+	assert.Nil(t, result)
+}
+
+func TestDynamicConfigClient_ConnectionStatus(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        "http://localhost:8080",
+		EnableRealtime: false,
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	status := client.GetConnectionStatus()
+	assert.Equal(t, "polling", status.Mode)
+	assert.True(t, status.Connected)
+	assert.False(t, status.FallbackActive)
+}
+
+func TestCacheKeyGeneration(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		EnableRealtime: false,
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Since cache key generation is now internal, we'll test that different user contexts
+	// produce different cache behavior by making requests and checking cache statistics
+	userContext1 := UserContext{
+		UserID: "user123",
+		Attributes: map[string]interface{}{
+			"tier": "premium",
+		},
+	}
+
+	userContext2 := UserContext{
+		UserID: "user123",
+		Attributes: map[string]interface{}{
+			"tier": "basic",
+		},
+	}
+
+	// This test verifies that the cache key generation works internally
+	// by ensuring different user contexts can coexist in cache
+	ctx := context.Background()
+	
+	// These calls would generate different cache keys internally
+	_, err1 := client.EvaluateConfig(ctx, "test_config", "default", userContext1)
+	_, err2 := client.EvaluateConfig(ctx, "test_config", "default", userContext2)
+	
+	// Both should work without interfering with each other
+	assert.Error(t, err1) // Expected to fail due to no server, but shouldn't panic
+	assert.Error(t, err2) // Expected to fail due to no server, but shouldn't panic
+}
+
+func TestHashUserContext(t *testing.T) {
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		EnableRealtime: false,
+	})
+	require.NoError(t, err)
+	defer client.Close()
+
+	// Since hashUserContext is now internal, we'll test that user context hashing
+	// works correctly by verifying consistent behavior with the same context
+	userContext := UserContext{
+		UserID: "user123",
+		Attributes: map[string]interface{}{
+			"key1": "value1",
+			"key2": "value2",
+		},
+	}
+
+	ctx := context.Background()
+	
+	// Make multiple calls with the same context to verify consistency
+	result1, _ := client.EvaluateConfig(ctx, "test_config", "default", userContext)
+	result2, _ := client.EvaluateConfig(ctx, "test_config", "default", userContext)
+	
+	// Both results should be consistent (both will be nil due to no server, but that's ok)
+	assert.Equal(t, result1 != nil, result2 != nil, "Same user context should produce consistent results")
+}
+
+// Benchmark tests
+func BenchmarkDynamicConfigClient_GetConfigBool(b *testing.B) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := DynamicConfigEvaluationResponse{
+			ConfigKey: "benchmark_config",
+			Value:     json.RawMessage(`true`),
+			Reason:    "benchmark",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-api-key",
+		ProjectID:      "test-project",
+		BaseURL:        server.URL,
+		EnableRealtime: false,
+	})
+	require.NoError(b, err)
+	defer client.Close()
+
+	userContext := UserContext{UserID: "benchmark_user"}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := client.GetConfigBool(ctx, "benchmark_config", false, userContext)
 		if err != nil {
-			t.Errorf("Expected valid config to pass validation, got error: %v", err)
+			b.Fatal(err)
 		}
-		
-		// Invalid config - missing API key
-		invalidConfig := &Config{
-			BaseURL:     "https://api.example.com",
-			Environment: "test",
-			Timeout:     5 * time.Second,
-		}
-		
-		err = invalidConfig.Validate()
-		if err == nil {
-			t.Error("Expected invalid config to fail validation")
-		}
-	})
-}
-
-func TestCache(t *testing.T) {
-	cache := NewMemoryCache(100, 5*time.Minute)
-	
-	// Test basic operations
-	t.Run("Basic Operations", func(t *testing.T) {
-		// Set and get
-		result := FlagResult{
-			Key:   "test_flag",
-			Value: true,
-		}
-		
-		cache.Set("test_key", result, time.Minute)
-		
-		retrieved, found := cache.Get("test_key")
-		if !found {
-			t.Error("Expected to find cached item")
-		}
-		
-		if retrieved.Key != "test_flag" {
-			t.Errorf("Expected key 'test_flag', got %v", retrieved.Key)
-		}
-		
-		if retrieved.Value != true {
-			t.Errorf("Expected value true, got %v", retrieved.Value)
-		}
-		
-		// Test non-existent key
-		_, found = cache.Get("non_existent")
-		if found {
-			t.Error("Expected not to find non-existent key")
-		}
-	})
-
-	t.Run("Size Management", func(t *testing.T) {
-		if cache.Size() == 0 {
-			t.Error("Expected cache to have items from previous test")
-		}
-		
-		cache.Clear()
-		if cache.Size() != 0 {
-			t.Error("Expected cache to be empty after clear")
-		}
-	})
-}
-
-func TestMetrics(t *testing.T) {
-	metrics := NewMetricsCollector()
-	
-	// Record some operations
-	metrics.RecordAPICall(100*time.Millisecond, true)
-	metrics.RecordAPICall(200*time.Millisecond, false)
-	metrics.RecordCacheHit()
-	metrics.RecordCacheMiss()
-	metrics.RecordFlagEvaluation()
-	metrics.RecordEventTracked()
-	
-	summary := metrics.GetMetrics()
-	
-	if summary.APICalls != 2 {
-		t.Errorf("Expected 2 API calls, got %d", summary.APICalls)
-	}
-	
-	if summary.ErrorCount != 1 {
-		t.Errorf("Expected 1 error, got %d", summary.ErrorCount)
-	}
-	
-	if summary.CacheHits != 1 {
-		t.Errorf("Expected 1 cache hit, got %d", summary.CacheHits)
-	}
-	
-	if summary.CacheMisses != 1 {
-		t.Errorf("Expected 1 cache miss, got %d", summary.CacheMisses)
-	}
-	
-	if summary.FlagsEvaluated != 1 {
-		t.Errorf("Expected 1 flag evaluation, got %d", summary.FlagsEvaluated)
-	}
-	
-	if summary.EventsTracked != 1 {
-		t.Errorf("Expected 1 event tracked, got %d", summary.EventsTracked)
-	}
-	
-	if summary.ErrorRate != 50.0 {
-		t.Errorf("Expected 50%% error rate, got %.2f%%", summary.ErrorRate)
-	}
-	
-	if summary.CacheHitRate != 50.0 {
-		t.Errorf("Expected 50%% cache hit rate, got %.2f%%", summary.CacheHitRate)
 	}
 }

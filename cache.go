@@ -1,376 +1,338 @@
 package variably
 
 import (
-	"container/list"
-	"encoding/json"
-	"os"
+	"context"
+	"regexp"
 	"sync"
 	"time"
 )
 
-// MemoryCache implements an in-memory LRU cache with TTL support
+// CacheEntry represents a cached item
+type CacheEntry struct {
+	Value     interface{}
+	Timestamp time.Time
+	TTL       time.Duration
+}
+
+// IsExpired checks if the cache entry has expired
+func (e *CacheEntry) IsExpired() bool {
+	return time.Since(e.Timestamp) > e.TTL
+}
+
+// Cache provides an in-memory cache with TTL support
+type Cache interface {
+	Get(key string) (interface{}, bool)
+	Set(key string, value interface{}, ttl time.Duration)
+	Delete(key string) bool
+	Clear()
+	ClearByPattern(pattern string) int
+	Size() int
+	GetStats() CacheStats
+}
+
+// CacheStats provides cache statistics
+type CacheStats struct {
+	Size    int     `json:"size"`
+	MaxSize int     `json:"max_size"`
+	HitRate float64 `json:"hit_rate"`
+	Enabled bool    `json:"enabled"`
+}
+
+// MemoryCache is an in-memory implementation of Cache
 type MemoryCache struct {
-	maxSize    int
-	items      map[string]*cacheItem
-	lruList    *list.List
-	mutex      sync.RWMutex
-	defaultTTL time.Duration
+	config    CacheConfig
+	entries   map[string]*CacheEntry
+	mutex     sync.RWMutex
+	stopCh    chan struct{}
+	hits      int64
+	misses    int64
+	statsLock sync.RWMutex
 }
 
-type cacheItem struct {
-	key        string
-	value      FlagResult
-	expiration time.Time
-	element    *list.Element
-}
-
-// NewMemoryCache creates a new in-memory cache
-func NewMemoryCache(maxSize int, defaultTTL time.Duration) *MemoryCache {
-	return &MemoryCache{
-		maxSize:    maxSize,
-		items:      make(map[string]*cacheItem),
-		lruList:    list.New(),
-		defaultTTL: defaultTTL,
+// NewMemoryCache creates a new memory cache
+func NewMemoryCache(config CacheConfig) *MemoryCache {
+	cache := &MemoryCache{
+		config:  config,
+		entries: make(map[string]*CacheEntry),
+		stopCh:  make(chan struct{}),
 	}
-}
-
-// Get retrieves a value from the cache
-func (c *MemoryCache) Get(key string) (FlagResult, bool) {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	item, exists := c.items[key]
-	if !exists {
-		return FlagResult{}, false
+	
+	if config.Enabled {
+		go cache.startCleanup()
 	}
-
-	// Check if item has expired
-	if time.Now().After(item.expiration) {
-		// Item expired, remove it (but don't delete while holding read lock)
-		go c.Delete(key)
-		return FlagResult{}, false
-	}
-
-	// Move to front (most recently used)
-	c.lruList.MoveToFront(item.element)
-	return item.value, true
-}
-
-// Set stores a value in the cache
-func (c *MemoryCache) Set(key string, result FlagResult, ttl time.Duration) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	if ttl == 0 {
-		ttl = c.defaultTTL
-	}
-
-	expiration := time.Now().Add(ttl)
-
-	// If item already exists, update it
-	if existingItem, exists := c.items[key]; exists {
-		existingItem.value = result
-		existingItem.expiration = expiration
-		c.lruList.MoveToFront(existingItem.element)
-		return
-	}
-
-	// Create new item
-	item := &cacheItem{
-		key:        key,
-		value:      result,
-		expiration: expiration,
-	}
-
-	// Add to front of LRU list
-	item.element = c.lruList.PushFront(item)
-	c.items[key] = item
-
-	// Evict if over capacity
-	c.evictIfNeeded()
-}
-
-// Delete removes a value from the cache
-func (c *MemoryCache) Delete(key string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	if item, exists := c.items[key]; exists {
-		c.lruList.Remove(item.element)
-		delete(c.items, key)
-	}
-}
-
-// Clear removes all items from the cache
-func (c *MemoryCache) Clear() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	c.items = make(map[string]*cacheItem)
-	c.lruList.Init()
-}
-
-// Size returns the current number of items in the cache
-func (c *MemoryCache) Size() int {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return len(c.items)
-}
-
-// Keys returns all keys in the cache
-func (c *MemoryCache) Keys() []string {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	keys := make([]string, 0, len(c.items))
-	for key := range c.items {
-		keys = append(keys, key)
-	}
-	return keys
-}
-
-// evictIfNeeded removes the least recently used items if over capacity
-func (c *MemoryCache) evictIfNeeded() {
-	for len(c.items) > c.maxSize {
-		// Remove least recently used item (from back of list)
-		oldest := c.lruList.Back()
-		if oldest != nil {
-			item := oldest.Value.(*cacheItem)
-			c.lruList.Remove(oldest)
-			delete(c.items, item.key)
-		}
-	}
-}
-
-// CleanupExpired removes all expired items from the cache
-func (c *MemoryCache) CleanupExpired() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	now := time.Now()
-	var expiredKeys []string
-
-	for key, item := range c.items {
-		if now.After(item.expiration) {
-			expiredKeys = append(expiredKeys, key)
-		}
-	}
-
-	for _, key := range expiredKeys {
-		if item, exists := c.items[key]; exists {
-			c.lruList.Remove(item.element)
-			delete(c.items, key)
-		}
-	}
-}
-
-// PersistentCache implements a file-based persistent cache
-type PersistentCache struct {
-	memoryCache *MemoryCache
-	filePath    string
-	mutex       sync.RWMutex
-}
-
-type persistentCacheData struct {
-	Items map[string]persistentCacheItem `json:"items"`
-}
-
-type persistentCacheItem struct {
-	Value      FlagResult `json:"value"`
-	Expiration time.Time  `json:"expiration"`
-}
-
-// NewPersistentCache creates a new persistent cache
-func NewPersistentCache(maxSize int, defaultTTL time.Duration, filePath string) *PersistentCache {
-	cache := &PersistentCache{
-		memoryCache: NewMemoryCache(maxSize, defaultTTL),
-		filePath:    filePath,
-	}
-
-	// Load existing data from file
-	cache.loadFromFile()
-
+	
 	return cache
 }
 
 // Get retrieves a value from the cache
-func (c *PersistentCache) Get(key string) (FlagResult, bool) {
-	return c.memoryCache.Get(key)
-}
-
-// Set stores a value in the cache and persists it
-func (c *PersistentCache) Set(key string, result FlagResult, ttl time.Duration) {
-	c.memoryCache.Set(key, result, ttl)
-	c.saveToFile()
-}
-
-// Delete removes a value from the cache and updates persistence
-func (c *PersistentCache) Delete(key string) {
-	c.memoryCache.Delete(key)
-	c.saveToFile()
-}
-
-// Clear removes all items from the cache and clears persistence
-func (c *PersistentCache) Clear() {
-	c.memoryCache.Clear()
-	c.saveToFile()
-}
-
-// Size returns the current number of items in the cache
-func (c *PersistentCache) Size() int {
-	return c.memoryCache.Size()
-}
-
-// Keys returns all keys in the cache
-func (c *PersistentCache) Keys() []string {
-	return c.memoryCache.Keys()
-}
-
-// loadFromFile loads cache data from the persistent file
-func (c *PersistentCache) loadFromFile() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	data, err := os.ReadFile(c.filePath)
-	if err != nil {
-		// File doesn't exist or can't be read, start with empty cache
-		return
+func (c *MemoryCache) Get(key string) (interface{}, bool) {
+	if !c.config.Enabled {
+		c.recordMiss()
+		return nil, false
 	}
 
-	var cacheData persistentCacheData
-	if err := json.Unmarshal(data, &cacheData); err != nil {
-		// Invalid file format, start with empty cache
-		return
+	c.mutex.RLock()
+	entry, exists := c.entries[key]
+	c.mutex.RUnlock()
+
+	if !exists {
+		c.recordMiss()
+		return nil, false
 	}
 
-	// Load non-expired items into memory cache
-	now := time.Now()
-	for key, item := range cacheData.Items {
-		if now.Before(item.Expiration) {
-			ttl := time.Until(item.Expiration)
-			c.memoryCache.Set(key, item.Value, ttl)
-		}
-	}
-}
-
-// saveToFile saves current cache data to the persistent file
-func (c *PersistentCache) saveToFile() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	// Get all current items from memory cache
-	items := make(map[string]persistentCacheItem)
-	
-	c.memoryCache.mutex.RLock()
-	for key, item := range c.memoryCache.items {
-		items[key] = persistentCacheItem{
-			Value:      item.value,
-			Expiration: item.expiration,
-		}
-	}
-	c.memoryCache.mutex.RUnlock()
-
-	cacheData := persistentCacheData{Items: items}
-
-	data, err := json.Marshal(cacheData)
-	if err != nil {
-		// Failed to marshal, can't save
-		return
+	if entry.IsExpired() {
+		c.mutex.Lock()
+		delete(c.entries, key)
+		c.mutex.Unlock()
+		c.recordMiss()
+		return nil, false
 	}
 
-	// Write to temporary file first, then rename (atomic operation)
-	tempFile := c.filePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
-		return
-	}
-
-	os.Rename(tempFile, c.filePath)
-}
-
-// CacheManager manages different cache implementations
-type CacheManager struct {
-	cache  Cache
-	config CacheConfig
-	logger Logger
-}
-
-// NewCacheManager creates a new cache manager with the specified configuration
-func NewCacheManager(config CacheConfig, logger Logger) *CacheManager {
-	var cache Cache
-
-	if config.EnablePersistence && config.PersistencePath != "" {
-		cache = NewPersistentCache(config.MaxSize, config.TTL, config.PersistencePath)
-	} else {
-		cache = NewMemoryCache(config.MaxSize, config.TTL)
-	}
-
-	return &CacheManager{
-		cache:  cache,
-		config: config,
-		logger: logger,
-	}
-}
-
-// Get retrieves a value from the cache
-func (cm *CacheManager) Get(key string) (FlagResult, bool) {
-	return cm.cache.Get(key)
+	c.recordHit()
+	return entry.Value, true
 }
 
 // Set stores a value in the cache
-func (cm *CacheManager) Set(key string, result FlagResult, ttl time.Duration) {
-	if ttl == 0 {
-		ttl = cm.config.TTL
+func (c *MemoryCache) Set(key string, value interface{}, ttl time.Duration) {
+	if !c.config.Enabled {
+		return
 	}
-	cm.cache.Set(key, result, ttl)
+
+	if ttl == 0 {
+		ttl = c.config.TTL
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	// Enforce max size by removing oldest entries
+	if len(c.entries) >= c.config.MaxSize {
+		c.evictOldest()
+	}
+
+	c.entries[key] = &CacheEntry{
+		Value:     value,
+		Timestamp: time.Now(),
+		TTL:       ttl,
+	}
 }
 
 // Delete removes a value from the cache
-func (cm *CacheManager) Delete(key string) {
-	cm.cache.Delete(key)
+func (c *MemoryCache) Delete(key string) bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	_, existed := c.entries[key]
+	delete(c.entries, key)
+	return existed
 }
 
-// Clear removes all values from the cache
-func (cm *CacheManager) Clear() {
-	cm.cache.Clear()
-	cm.logger.Info("Cache cleared")
+// Clear removes all entries from the cache
+func (c *MemoryCache) Clear() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.entries = make(map[string]*CacheEntry)
 }
 
-// Size returns the current cache size
-func (cm *CacheManager) Size() int {
-	return cm.cache.Size()
+// ClearByPattern removes entries matching a pattern
+func (c *MemoryCache) ClearByPattern(pattern string) int {
+	if !c.config.Enabled {
+		return 0
+	}
+
+	// Convert simple pattern to regex (supports * wildcard)
+	regexPattern := "^" + regexp.QuoteMeta(pattern)
+	regexPattern = regexp.MustCompile(`\\\*`).ReplaceAllString(regexPattern, ".*")
+	regexPattern += "$"
+	
+	regex, err := regexp.Compile(regexPattern)
+	if err != nil {
+		return 0
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	keysToDelete := make([]string, 0)
+	for key := range c.entries {
+		if regex.MatchString(key) {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	for _, key := range keysToDelete {
+		delete(c.entries, key)
+	}
+
+	return len(keysToDelete)
 }
 
-// Keys returns all cache keys
-func (cm *CacheManager) Keys() []string {
-	return cm.cache.Keys()
+// Size returns the number of entries in the cache
+func (c *MemoryCache) Size() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return len(c.entries)
 }
 
-// StartCleanup starts a background goroutine to clean up expired cache entries
-func (cm *CacheManager) StartCleanup(stopCh <-chan struct{}) {
-	ticker := time.NewTicker(time.Minute) // Clean up every minute
+// GetStats returns cache statistics
+func (c *MemoryCache) GetStats() CacheStats {
+	c.statsLock.RLock()
+	hits := c.hits
+	misses := c.misses
+	c.statsLock.RUnlock()
+
+	total := hits + misses
+	hitRate := 0.0
+	if total > 0 {
+		hitRate = float64(hits) / float64(total)
+	}
+
+	return CacheStats{
+		Size:    c.Size(),
+		MaxSize: c.config.MaxSize,
+		HitRate: hitRate,
+		Enabled: c.config.Enabled,
+	}
+}
+
+// Close stops the cleanup goroutine
+func (c *MemoryCache) Close() {
+	close(c.stopCh)
+}
+
+// evictOldest removes the oldest entry from the cache
+func (c *MemoryCache) evictOldest() {
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+
+	for key, entry := range c.entries {
+		if first || entry.Timestamp.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = entry.Timestamp
+			first = false
+		}
+	}
+
+	if oldestKey != "" {
+		delete(c.entries, oldestKey)
+	}
+}
+
+// cleanup removes expired entries
+func (c *MemoryCache) cleanup() {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	keysToDelete := make([]string, 0)
+	for key, entry := range c.entries {
+		if entry.IsExpired() {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	for _, key := range keysToDelete {
+		delete(c.entries, key)
+	}
+}
+
+// startCleanup starts the periodic cleanup goroutine
+func (c *MemoryCache) startCleanup() {
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if memCache, ok := cm.cache.(*MemoryCache); ok {
-				memCache.CleanupExpired()
-			} else if persCache, ok := cm.cache.(*PersistentCache); ok {
-				persCache.memoryCache.CleanupExpired()
-				persCache.saveToFile()
-			}
-		case <-stopCh:
+			c.cleanup()
+		case <-c.stopCh:
 			return
 		}
 	}
 }
 
+// recordHit increments the hit counter
+func (c *MemoryCache) recordHit() {
+	c.statsLock.Lock()
+	c.hits++
+	c.statsLock.Unlock()
+}
+
+// recordMiss increments the miss counter
+func (c *MemoryCache) recordMiss() {
+	c.statsLock.Lock()
+	c.misses++
+	c.statsLock.Unlock()
+}
+
+// CacheManager manages cache operations with a specific context
+type CacheManager struct {
+	cache  Cache
+	logger Logger
+}
+
+// NewCacheManager creates a new cache manager
+func NewCacheManager(config CacheConfig, logger Logger) *CacheManager {
+	return &CacheManager{
+		cache:  NewMemoryCache(config),
+		logger: logger,
+	}
+}
+
+// Get retrieves a value from the cache
+func (cm *CacheManager) Get(ctx context.Context, key string) (interface{}, bool) {
+	value, found := cm.cache.Get(key)
+	if found {
+		cm.logger.Debug("Cache hit", map[string]interface{}{"key": key})
+	} else {
+		cm.logger.Debug("Cache miss", map[string]interface{}{"key": key})
+	}
+	return value, found
+}
+
+// Set stores a value in the cache
+func (cm *CacheManager) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) {
+	cm.cache.Set(key, value, ttl)
+	cm.logger.Debug("Cache entry set", map[string]interface{}{"key": key, "ttl": ttl.String()})
+}
+
+// Delete removes a value from the cache
+func (cm *CacheManager) Delete(ctx context.Context, key string) bool {
+	deleted := cm.cache.Delete(key)
+	if deleted {
+		cm.logger.Debug("Cache entry deleted", map[string]interface{}{"key": key})
+	}
+	return deleted
+}
+
+// Clear removes all entries from the cache
+func (cm *CacheManager) Clear(ctx context.Context) {
+	size := cm.cache.Size()
+	cm.cache.Clear()
+	cm.logger.Debug("Cache cleared", map[string]interface{}{"entries_removed": size})
+}
+
+// ClearByPattern removes entries matching a pattern
+func (cm *CacheManager) ClearByPattern(ctx context.Context, pattern string) int {
+	removed := cm.cache.ClearByPattern(pattern)
+	if removed > 0 {
+		cm.logger.Debug("Cache entries cleared by pattern", map[string]interface{}{
+			"pattern":         pattern,
+			"entries_removed": removed,
+		})
+	}
+	return removed
+}
+
 // GetStats returns cache statistics
-func (cm *CacheManager) GetStats() map[string]interface{} {
-	return map[string]interface{}{
-		"size":     cm.cache.Size(),
-		"max_size": cm.config.MaxSize,
-		"ttl":      cm.config.TTL.String(),
-		"keys":     len(cm.cache.Keys()),
+func (cm *CacheManager) GetStats() CacheStats {
+	return cm.cache.GetStats()
+}
+
+// Close closes the cache manager
+func (cm *CacheManager) Close() {
+	if memCache, ok := cm.cache.(*MemoryCache); ok {
+		memCache.Close()
 	}
 }
